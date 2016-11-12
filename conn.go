@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -28,7 +27,6 @@ type Conn struct {
 	dataConn      DataSocket
 	driver        Driver
 	auth          Auth
-	logger        *Logger
 	server        *Server
 	tlsConfig     *tls.Config
 	sessionID     string
@@ -54,6 +52,14 @@ func (conn *Conn) PublicIp() string {
 	return conn.server.PublicIp
 }
 
+func (conn *Conn) SessionID() string {
+	return conn.sessionID
+}
+
+func (conn *Conn) Callbacks() ServerCallbacks {
+	return conn.server.Callbacks
+}
+
 func (conn *Conn) passiveListenIP() string {
 	if len(conn.PublicIp()) > 0 {
 		return conn.PublicIp()
@@ -66,7 +72,6 @@ func (conn *Conn) PassivePort() int {
 		portRange := strings.Split(conn.server.PassivePorts, "-")
 
 		if len(portRange) != 2 {
-			log.Println("empty port")
 			return 0
 		}
 
@@ -97,7 +102,7 @@ func newSessionID() string {
 // goroutine, so use this channel to be notified when the connection can be
 // cleaned up.
 func (conn *Conn) Serve() {
-	conn.logger.Print("Connection Established")
+	conn.cbConnectionEstabilished()
 	// send welcome
 	conn.writeMessage(220, conn.server.WelcomeMessage)
 	// read commands
@@ -105,7 +110,7 @@ func (conn *Conn) Serve() {
 		line, err := conn.controlReader.ReadString('\n')
 		if err != nil {
 			if err != io.EOF {
-				conn.logger.Print(fmt.Sprintln("read error:", err))
+				conn.cbConnectionFailed(err)
 			}
 
 			break
@@ -118,7 +123,7 @@ func (conn *Conn) Serve() {
 		}
 	}
 	conn.Close()
-	conn.logger.Print("Connection Terminated")
+	conn.cbConnectionTerminated()
 }
 
 // Close will manually close this connection, even if the client isn't ready.
@@ -132,7 +137,6 @@ func (conn *Conn) Close() {
 }
 
 func (conn *Conn) upgradeToTLS() error {
-	conn.logger.Print("Upgrading connectiion to TLS")
 	tlsConn := tls.Server(conn.conn, conn.tlsConfig)
 	err := tlsConn.Handshake()
 	if err == nil {
@@ -141,6 +145,7 @@ func (conn *Conn) upgradeToTLS() error {
 		conn.controlWriter = bufio.NewWriter(tlsConn)
 		conn.tls = true
 	}
+	conn.cbUpgradingToTLS(err)
 	return err
 }
 
@@ -148,7 +153,7 @@ func (conn *Conn) upgradeToTLS() error {
 // appropriate response.
 func (conn *Conn) receiveLine(line string) {
 	command, param := conn.parseLine(line)
-	conn.logger.PrintCommand(command, param)
+	conn.cbReceivingCommand(command, param)
 	cmdObj := commands[strings.ToUpper(command)]
 	if cmdObj == nil {
 		conn.writeMessage(500, "Command not found")
@@ -173,7 +178,7 @@ func (conn *Conn) parseLine(line string) (string, string) {
 
 // writeMessage will send a standard FTP response back to the client.
 func (conn *Conn) writeMessage(code int, message string) (wrote int, err error) {
-	conn.logger.PrintResponse(code, message)
+	conn.cbSendingResponse(code, message)
 	line := fmt.Sprintf("%d %s\r\n", code, message)
 	wrote, err = conn.controlWriter.WriteString(line)
 	conn.controlWriter.Flush()
@@ -237,4 +242,56 @@ func (conn *Conn) sendOutofBandDataWriter(data io.ReadCloser) error {
 	conn.dataConn = nil
 
 	return nil
+}
+
+func (conn *Conn) cbConnectionEstabilished() {
+	conn.server.Callbacks.ConnectionEstabilished(conn)
+}
+
+func (conn *Conn) cbConnectionTerminated() {
+	conn.server.Callbacks.ConnectionTerminated(conn)
+}
+
+func (conn *Conn) cbConnectionFailed(err error) {
+	conn.server.Callbacks.ConnectionFailed(conn, err)
+}
+
+func (conn *Conn) cbUserAuthentication(user string, ok bool, err error) {
+	conn.server.Callbacks.UserAuthentication(conn, user, ok, err)
+}
+
+func (conn *Conn) cbUpgradingToTLS(err error) {
+	conn.server.Callbacks.UpgradingToTLS(conn, err)
+}
+
+func (conn *Conn) cbActiveDataTransfer(host string, port int, err error) {
+	conn.server.Callbacks.ActiveDataTransfer(conn, host, port, err)
+}
+
+func (conn *Conn) cbPassiveDataTransfer(host string, port int, err error) {
+	conn.server.Callbacks.PassiveDataTransfer(conn, host, port, err)
+}
+
+func (conn *Conn) cbReceivingCommand(command string, parameters string) {
+	conn.server.Callbacks.ReceivingCommand(conn, command, parameters)
+}
+
+func (conn *Conn) cbSendingResponse(code int, message string) {
+	conn.server.Callbacks.SendingResponse(conn, code, message)
+}
+
+func (conn *Conn) cbDirectoryCreated(path string, err error) {
+	conn.server.Callbacks.DirectoryCreated(conn, path, err)
+}
+
+func (conn *Conn) cbDirectoryDeleted(path string, err error) {
+	conn.server.Callbacks.DirectoryDeleted(conn, path, err)
+}
+
+func (conn *Conn) cbFileReceived(path string, bytes int64, err error) {
+	conn.server.Callbacks.FileReceived(conn, path, bytes, err)
+}
+
+func (conn *Conn) cbFileDeleted(path string, err error) {
+	conn.server.Callbacks.FileDeleted(conn, path, err)
 }

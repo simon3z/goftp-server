@@ -26,28 +26,21 @@ type DataSocket interface {
 }
 
 type ftpActiveSocket struct {
-	conn   *net.TCPConn
-	host   string
-	port   int
-	logger *Logger
+	conn *net.TCPConn
+	host string
+	port int
 }
 
-func newActiveSocket(remote string, port int, logger *Logger) (DataSocket, error) {
+func newActiveSocket(remote string, port int) (DataSocket, error) {
 	connectTo := net.JoinHostPort(remote, strconv.Itoa(port))
 
-	logger.Print("Opening active data connection to " + connectTo)
-
 	raddr, err := net.ResolveTCPAddr("tcp", connectTo)
-
 	if err != nil {
-		logger.Print(err)
 		return nil, err
 	}
 
 	tcpConn, err := net.DialTCP("tcp", nil, raddr)
-
 	if err != nil {
-		logger.Print(err)
 		return nil, err
 	}
 
@@ -55,7 +48,6 @@ func newActiveSocket(remote string, port int, logger *Logger) (DataSocket, error
 	socket.conn = tcpConn
 	socket.host = remote
 	socket.port = port
-	socket.logger = logger
 
 	return socket, nil
 }
@@ -86,17 +78,15 @@ type ftpPassiveSocket struct {
 	host       string
 	ingress    chan []byte
 	egress     chan []byte
-	logger     *Logger
 	wg         sync.WaitGroup
 	err        error
 	tlsConfing *tls.Config
 }
 
-func newPassiveSocket(host string, port int, logger *Logger, tlsConfing *tls.Config) (DataSocket, error) {
+func newPassiveSocket(host string, port int, tlsConfing *tls.Config) (DataSocket, error) {
 	socket := new(ftpPassiveSocket)
 	socket.ingress = make(chan []byte)
 	socket.egress = make(chan []byte)
-	socket.logger = logger
 	socket.host = host
 	socket.port = port
 	if err := socket.GoListenAndServe(); err != nil {
@@ -138,23 +128,20 @@ func (socket *ftpPassiveSocket) Close() error {
 func (socket *ftpPassiveSocket) GoListenAndServe() (err error) {
 	laddr, err := net.ResolveTCPAddr("tcp", net.JoinHostPort("", strconv.Itoa(socket.port)))
 	if err != nil {
-		socket.logger.Print(err)
-		return
+		return err
 	}
 
 	var listener net.Listener
 	listener, err = net.ListenTCP("tcp", laddr)
 	if err != nil {
-		socket.logger.Print(err)
-		return
+		return err
 	}
 
 	add := listener.Addr()
 	parts := strings.Split(add.String(), ":")
 	port, err := strconv.Atoi(parts[len(parts)-1])
 	if err != nil {
-		socket.logger.Print(err)
-		return
+		return err
 	}
 
 	socket.port = port

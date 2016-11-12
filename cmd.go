@@ -13,8 +13,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-
-	"log"
 )
 
 type Command interface {
@@ -198,6 +196,7 @@ type commandDele struct { *commandBase }
 func (cmd commandDele) Execute(conn *Conn, param string) {
 	path := conn.buildPath(param)
 	err := conn.driver.DeleteFile(path)
+	conn.cbFileDeleted(path, err)
 	if err == nil {
 		conn.writeMessage(250, "File deleted")
 	} else {
@@ -228,7 +227,8 @@ func (cmd commandEprt) Execute(conn *Conn, param string) {
 		return
 	}
 
-	socket, err := newActiveSocket(host, port, conn.logger)
+	socket, err := newActiveSocket(host, port)
+	conn.cbActiveDataTransfer(host, port, err)
 	if err != nil {
 		conn.writeMessage(425, "Data connection failed")
 		return
@@ -252,9 +252,9 @@ func (cmd commandEpsv) Execute(conn *Conn, param string) {
 		return
 	}
 
-	socket, err := newPassiveSocket(addr[:lastIdx], conn.PassivePort(), conn.logger, conn.tlsConfig)
+	socket, err := newPassiveSocket(addr[:lastIdx], conn.PassivePort(), conn.tlsConfig)
+	conn.cbPassiveDataTransfer(addr[:lastIdx], conn.PassivePort(), err)
 	if err != nil {
-		log.Println(err)
 		conn.writeMessage(425, "Data connection failed")
 		return
 	}
@@ -292,7 +292,6 @@ func (cmd commandList) Execute(conn *Conn, param string) {
 	}
 
 	if !info.IsDir() {
-		conn.logger.Printf("%s is not a dir.\n", path)
 		return
 	}
 	var files []FileInfo
@@ -373,6 +372,7 @@ type commandMkd struct { *commandBase }
 func (cmd commandMkd) Execute(conn *Conn, param string) {
 	path := conn.buildPath(param)
 	err := conn.driver.MakeDir(path)
+	conn.cbDirectoryCreated(path, err)
 	if err == nil {
 		conn.writeMessage(257, "Directory created")
 	} else {
@@ -412,6 +412,7 @@ type commandPass struct { *commandBase }
 
 func (cmd commandPass) Execute(conn *Conn, param string) {
 	ok, err := conn.server.Auth.CheckPasswd(conn.reqUser, param)
+	conn.cbUserAuthentication(conn.reqUser, ok, err)
 	if err != nil {
 		conn.writeMessage(550, "Checking password error")
 		return
@@ -435,7 +436,8 @@ type commandPasv struct { *commandBase }
 func (cmd commandPasv) Execute(conn *Conn, param string) {
 	listenIP := conn.passiveListenIP()
 
-	socket, err := newPassiveSocket(listenIP, conn.PassivePort(), conn.logger, conn.tlsConfig)
+	socket, err := newPassiveSocket(listenIP, conn.PassivePort(), conn.tlsConfig)
+	conn.cbPassiveDataTransfer(listenIP, conn.PassivePort(), err)
 	if err != nil {
 		conn.writeMessage(425, "Data connection failed")
 		return
@@ -474,7 +476,8 @@ func (cmd commandPort) Execute(conn *Conn, param string) {
 
 	port := portFirstWord<<8 + portSecondWord
 
-	socket, err := newActiveSocket(host, port, conn.logger)
+	socket, err := newActiveSocket(host, port)
+	conn.cbActiveDataTransfer(host, port, err)
 	if err != nil {
 		conn.writeMessage(425, "Data connection failed")
 		return
@@ -570,6 +573,7 @@ type commandRmd struct { *commandBase }
 func (cmd commandRmd) Execute(conn *Conn, param string) {
 	path := conn.buildPath(param)
 	err := conn.driver.DeleteDir(path)
+	conn.cbDirectoryDeleted(path, err)
 	if err == nil {
 		conn.writeMessage(250, "Directory deleted")
 	} else {
@@ -588,12 +592,11 @@ func (cmd commandAdat) Execute(conn *Conn, param string) {
 type commandAuth struct { *commandBase }
 
 func (cmd commandAuth) Execute(conn *Conn, param string) {
-	log.Println(param, conn)
 	if param == "TLS" && conn.tlsConfig != nil {
 		conn.writeMessage(234, "AUTH command OK")
 		err := conn.upgradeToTLS()
 		if err != nil {
-			conn.logger.Printf("Error upgrading conection to TLS %v", err)
+			conn.writeMessage(550, fmt.Sprintf("Action not taken %s", err))
 		}
 	} else {
 		conn.writeMessage(550, "Action not taken")
@@ -654,7 +657,6 @@ func (cmd commandSize) Execute(conn *Conn, param string) {
 	path := conn.buildPath(param)
 	stat, err := conn.driver.Stat(path)
 	if err != nil {
-		log.Printf("Size: error(%s)", err)
 		conn.writeMessage(450, fmt.Sprintf("path %s not found", path))
 	} else {
 		conn.writeMessage(213, strconv.Itoa(int(stat.Size())))
@@ -674,6 +676,7 @@ func (cmd commandStor) Execute(conn *Conn, param string) {
 	}()
 
 	bytes, err := conn.driver.PutFile(targetPath, conn.dataConn, conn.appendData)
+	conn.cbFileReceived(targetPath, bytes, err)
 	if err == nil {
 		msg := "OK, received " + strconv.Itoa(int(bytes)) + " bytes"
 		conn.writeMessage(226, msg)

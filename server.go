@@ -48,6 +48,9 @@ type ServerOpts struct {
 	// If ture TLS is used in RFC4217 mode
 	ExplicitFTPS bool
 
+	// Server callbacks
+	Callbacks ServerCallbacks
+
 	WelcomeMessage string
 }
 
@@ -58,7 +61,6 @@ type ServerOpts struct {
 type Server struct {
 	*ServerOpts
 	listenTo  string
-	logger    *Logger
 	listener  net.Listener
 	tlsConfig *tls.Config
 }
@@ -97,6 +99,12 @@ func serverOptsWithDefaults(opts *ServerOpts) *ServerOpts {
 		newOpts.Auth = opts.Auth
 	}
 
+	if opts.Callbacks != nil {
+		newOpts.Callbacks = opts.Callbacks
+	} else {
+		newOpts.Callbacks = NewDefaultCallbacks()
+	}
+
 	newOpts.TLS = opts.TLS
 	newOpts.KeyFile = opts.KeyFile
 	newOpts.CertFile = opts.CertFile
@@ -130,7 +138,6 @@ func NewServer(opts *ServerOpts) *Server {
 	s := new(Server)
 	s.ServerOpts = opts
 	s.listenTo = net.JoinHostPort(opts.Hostname, strconv.Itoa(opts.Port))
-	s.logger = newLogger("")
 	return s
 }
 
@@ -148,7 +155,6 @@ func (server *Server) newConn(tcpConn net.Conn, driver Driver) *Conn {
 	c.auth = server.Auth
 	c.server = server
 	c.sessionID = newSessionID()
-	c.logger = newLogger(c.sessionID)
 	c.tlsConfig = server.tlsConfig
 	driver.Init(c)
 	return c
@@ -199,24 +205,24 @@ func (server *Server) ListenAndServe() error {
 		return err
 	}
 
-	server.logger.Printf("%s listening on %d", server.Name, server.Port)
-
 	server.listener = listener
+
 	for {
 		tcpConn, err := server.listener.Accept()
 		if err != nil {
-			server.logger.Printf("listening error: %v", err)
-			break
+			return err
 		}
+
 		driver, err := server.Factory.NewDriver()
 		if err != nil {
-			server.logger.Printf("Error creating driver, aborting client connection: %v", err)
 			tcpConn.Close()
-		} else {
-			ftpConn := server.newConn(tcpConn, driver)
-			go ftpConn.Serve()
+			return err
 		}
+
+		ftpConn := server.newConn(tcpConn, driver)
+		go ftpConn.Serve()
 	}
+
 	return nil
 }
 
