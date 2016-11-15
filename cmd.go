@@ -10,6 +10,7 @@ package server
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -212,20 +213,29 @@ type commandEprt struct { *commandBase }
 func (cmd commandEprt) Execute(conn *Conn, param string) {
 	delim := string(param[0:1])
 	parts := strings.Split(param, delim)
-	addressFamily, err := strconv.Atoi(parts[1])
+
 	host := parts[2]
-	port, err := strconv.Atoi(parts[3])
-	if addressFamily != 1 && addressFamily != 2 {
+
+	addressFamily, err := strconv.Atoi(parts[1])
+	if err != nil || (addressFamily != 1 && addressFamily != 2) {
 		conn.writeMessage(522, "Network protocol not supported, use (1,2)")
 		return
 	}
+
+	port, err := strconv.Atoi(parts[3])
+	if err != nil {
+		conn.writeMessage(522, fmt.Sprintf("Port format not supported (%s)", port))
+		return
+	}
+
 	socket, err := newActiveSocket(host, port, conn.logger)
 	if err != nil {
 		conn.writeMessage(425, "Data connection failed")
 		return
 	}
+
 	conn.dataConn = socket
-	conn.writeMessage(200, "Connection established ("+strconv.Itoa(port)+")")
+	conn.writeMessage(200, fmt.Sprintf("Connection established (%d)", port))
 }
 
 // commandEpsv responds to the EPSV FTP command. It allows the client to
@@ -235,6 +245,7 @@ type commandEpsv struct { *commandBase }
 
 func (cmd commandEpsv) Execute(conn *Conn, param string) {
 	addr := conn.passiveListenIP()
+
 	lastIdx := strings.LastIndex(addr, ":")
 	if lastIdx <= 0 {
 		conn.writeMessage(425, "Data connection failed")
@@ -247,9 +258,9 @@ func (cmd commandEpsv) Execute(conn *Conn, param string) {
 		conn.writeMessage(425, "Data connection failed")
 		return
 	}
+
 	conn.dataConn = socket
-	msg := fmt.Sprintf("Entering Extended Passive Mode (|||%d|)", socket.Port())
-	conn.writeMessage(229, msg)
+	conn.writeMessage(229, fmt.Sprintf("Entering Extended Passive Mode (|||%d|)", socket.Port()))
 }
 
 // commandList responds to the LIST FTP command. It allows the client to retreive
@@ -423,18 +434,19 @@ type commandPasv struct { *commandBase }
 
 func (cmd commandPasv) Execute(conn *Conn, param string) {
 	listenIP := conn.passiveListenIP()
+
 	socket, err := newPassiveSocket(listenIP, conn.PassivePort(), conn.logger, conn.tlsConfig)
 	if err != nil {
 		conn.writeMessage(425, "Data connection failed")
 		return
 	}
+
 	conn.dataConn = socket
-	p1 := socket.Port() / 256
-	p2 := socket.Port() - (p1 * 256)
-	quads := strings.Split(listenIP, ".")
-	target := fmt.Sprintf("(%s,%s,%s,%s,%d,%d)", quads[0], quads[1], quads[2], quads[3], p1, p2)
-	msg := "Entering Passive Mode " + target
-	conn.writeMessage(227, msg)
+
+	addr := net.ParseIP(listenIP)
+	target := fmt.Sprintf("(%d,%d,%d,%d,%d,%d)", addr[0], addr[1], addr[2], addr[3], socket.Port() >> 8, socket.Port() & 0xFF)
+
+	conn.writeMessage(227, fmt.Sprintf("Entering Passive Mode %s", target))
 }
 
 // commandPort responds to the PORT FTP command.
@@ -444,18 +456,32 @@ func (cmd commandPasv) Execute(conn *Conn, param string) {
 type commandPort struct { *commandBase }
 
 func (cmd commandPort) Execute(conn *Conn, param string) {
-	nums := strings.Split(param, ",")
-	portOne, _ := strconv.Atoi(nums[4])
-	portTwo, _ := strconv.Atoi(nums[5])
-	port := (portOne * 256) + portTwo
-	host := nums[0] + "." + nums[1] + "." + nums[2] + "." + nums[3]
+	parts := strings.Split(param, ",")
+
+	host := strings.Join(parts[:4], ".")
+
+	portFirstWord, err := strconv.Atoi(parts[4])
+	if err != nil {
+		conn.writeMessage(522, fmt.Sprintf("Port format not supported (%s)", portFirstWord))
+		return
+	}
+
+	portSecondWord, err := strconv.Atoi(parts[5])
+	if err != nil {
+		conn.writeMessage(522, fmt.Sprintf("Port format not supported (%s)", portSecondWord))
+		return
+	}
+
+	port := portFirstWord<<8 + portSecondWord
+
 	socket, err := newActiveSocket(host, port, conn.logger)
 	if err != nil {
 		conn.writeMessage(425, "Data connection failed")
 		return
 	}
+
 	conn.dataConn = socket
-	conn.writeMessage(200, "Connection established ("+strconv.Itoa(port)+")")
+	conn.writeMessage(200, fmt.Sprintf("Connection established (%d)", port))
 }
 
 // commandPwd responds to the PWD FTP command.
