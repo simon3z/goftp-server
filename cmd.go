@@ -1,19 +1,14 @@
-/*
-http://tools.ietf.org/html/rfc959
+// Copyright 2018 The goftp Authors. All rights reserved.
+// Use of this source code is governed by a MIT-style
+// license that can be found in the LICENSE file.
 
-http://www.faqs.org/rfcs/rfc2389.html
-http://www.faqs.org/rfcs/rfc959.html
-
-http://tools.ietf.org/html/rfc2428
-*/
 package server
 
 import (
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
-
-	"log"
 )
 
 type Command interface {
@@ -161,8 +156,8 @@ func (cmd commandFeat) RequireAuth() bool {
 }
 
 var (
-	feats    = "211-Extensions supported:\n%s211 END"
-	featCmds = ""
+	feats    = "Extensions supported:\n%s"
+	featCmds = " UTF8\n"
 )
 
 func init() {
@@ -177,7 +172,7 @@ func (cmd commandFeat) Execute(conn *Conn, param string) {
 	if conn.tlsConfig != nil {
 		featCmds += " AUTH TLS\n PBSZ\n PROT\n"
 	}
-	conn.writeMessage(211, fmt.Sprintf(feats, featCmds))
+	conn.writeMessageMultiline(211, fmt.Sprintf(feats, featCmds))
 }
 
 // cmdCdup responds to the CDUP FTP command.
@@ -238,11 +233,11 @@ func (cmd commandDele) IsExtend() bool {
 }
 
 func (cmd commandDele) RequireParam() bool {
-	return false
+	return true
 }
 
 func (cmd commandDele) RequireAuth() bool {
-	return false
+	return true
 }
 
 func (cmd commandDele) Execute(conn *Conn, param string) {
@@ -282,7 +277,7 @@ func (cmd commandEprt) Execute(conn *Conn, param string) {
 		conn.writeMessage(522, "Network protocol not supported, use (1,2)")
 		return
 	}
-	socket, err := newActiveSocket(host, port, conn.logger)
+	socket, err := newActiveSocket(host, port, conn.logger, conn.sessionID)
 	if err != nil {
 		conn.writeMessage(425, "Data connection failed")
 		return
@@ -316,7 +311,7 @@ func (cmd commandEpsv) Execute(conn *Conn, param string) {
 		return
 	}
 
-	socket, err := newPassiveSocket(addr[:lastIdx], conn.PassivePort(), conn.logger, conn.tlsConfig)
+	socket, err := newPassiveSocket(addr[:lastIdx], conn.PassivePort(), conn.logger, conn.sessionID, conn.tlsConfig)
 	if err != nil {
 		log.Println(err)
 		conn.writeMessage(425, "Data connection failed")
@@ -344,31 +339,15 @@ func (cmd commandList) RequireAuth() bool {
 }
 
 func (cmd commandList) Execute(conn *Conn, param string) {
-	conn.writeMessage(150, "Opening ASCII mode data connection for file list")
-	var fpath string
-	if len(param) == 0 {
-		fpath = param
-	} else {
-		fields := strings.Fields(param)
-		for _, field := range fields {
-			if strings.HasPrefix(field, "-") {
-				//TODO: currently ignore all the flag
-				//fpath = conn.namePrefix
-			} else {
-				fpath = field
-			}
-		}
-	}
-
-	path := conn.buildPath(fpath)
+	path := conn.buildPath(parseListParam(param))
 	info, err := conn.driver.Stat(path)
 	if err != nil {
 		conn.writeMessage(550, err.Error())
 		return
 	}
 
-	if !info.IsDir() {
-		conn.logger.Printf("%s is not a dir.\n", path)
+	if info == nil || !info.IsDir() {
+		conn.logger.Printf(conn.sessionID, "%s is not a dir.\n", path)
 		return
 	}
 	var files []FileInfo
@@ -381,7 +360,25 @@ func (cmd commandList) Execute(conn *Conn, param string) {
 		return
 	}
 
+	conn.writeMessage(150, "Opening ASCII mode data connection for file list")
 	conn.sendOutofbandData(listFormatter(files).Detailed())
+}
+
+func parseListParam(param string) (path string) {
+	if len(param) == 0 {
+		path = param
+	} else {
+		fields := strings.Fields(param)
+		i := 0
+		for _, field := range fields {
+			if !strings.HasPrefix(field, "-") {
+				break
+			}
+			i = strings.LastIndex(param, " "+field) + len(field) + 1
+		}
+		path = strings.TrimLeft(param[i:], " ") //Get all the path even with space inside
+	}
+	return path
 }
 
 // commandNlst responds to the NLST FTP command. It allows the client to
@@ -401,30 +398,14 @@ func (cmd commandNlst) RequireAuth() bool {
 }
 
 func (cmd commandNlst) Execute(conn *Conn, param string) {
-	conn.writeMessage(150, "Opening ASCII mode data connection for file list")
-	var fpath string
-	if len(param) == 0 {
-		fpath = param
-	} else {
-		fields := strings.Fields(param)
-		for _, field := range fields {
-			if strings.HasPrefix(field, "-") {
-				//TODO: currently ignore all the flag
-				//fpath = conn.namePrefix
-			} else {
-				fpath = field
-			}
-		}
-	}
-
-	path := conn.buildPath(fpath)
+	path := conn.buildPath(parseListParam(param))
 	info, err := conn.driver.Stat(path)
 	if err != nil {
 		conn.writeMessage(550, err.Error())
 		return
 	}
 	if !info.IsDir() {
-		// TODO: should we show the file description?
+		conn.writeMessage(550, param+" is not a directory")
 		return
 	}
 
@@ -437,6 +418,7 @@ func (cmd commandNlst) Execute(conn *Conn, param string) {
 		conn.writeMessage(550, err.Error())
 		return
 	}
+	conn.writeMessage(150, "Opening ASCII mode data connection for file list")
 	conn.sendOutofbandData(listFormatter(files).Short())
 }
 
@@ -475,11 +457,11 @@ func (cmd commandMkd) IsExtend() bool {
 }
 
 func (cmd commandMkd) RequireParam() bool {
-	return false
+	return true
 }
 
 func (cmd commandMkd) RequireAuth() bool {
-	return false
+	return true
 }
 
 func (cmd commandMkd) Execute(conn *Conn, param string) {
@@ -551,7 +533,7 @@ func (cmd commandPass) IsExtend() bool {
 }
 
 func (cmd commandPass) RequireParam() bool {
-	return false
+	return true
 }
 
 func (cmd commandPass) RequireAuth() bool {
@@ -594,7 +576,12 @@ func (cmd commandPasv) RequireAuth() bool {
 
 func (cmd commandPasv) Execute(conn *Conn, param string) {
 	listenIP := conn.passiveListenIP()
-	socket, err := newPassiveSocket(listenIP, conn.PassivePort(), conn.logger, conn.tlsConfig)
+	lastIdx := strings.LastIndex(listenIP, ":")
+	if lastIdx <= 0 {
+		conn.writeMessage(425, "Data connection failed")
+		return
+	}
+	socket, err := newPassiveSocket(listenIP[:lastIdx], conn.PassivePort(), conn.logger, conn.sessionID, conn.tlsConfig)
 	if err != nil {
 		conn.writeMessage(425, "Data connection failed")
 		return
@@ -602,7 +589,7 @@ func (cmd commandPasv) Execute(conn *Conn, param string) {
 	conn.dataConn = socket
 	p1 := socket.Port() / 256
 	p2 := socket.Port() - (p1 * 256)
-	quads := strings.Split(listenIP, ".")
+	quads := strings.Split(listenIP[:lastIdx], ".")
 	target := fmt.Sprintf("(%s,%s,%s,%s,%d,%d)", quads[0], quads[1], quads[2], quads[3], p1, p2)
 	msg := "Entering Passive Mode " + target
 	conn.writeMessage(227, msg)
@@ -632,7 +619,7 @@ func (cmd commandPort) Execute(conn *Conn, param string) {
 	portTwo, _ := strconv.Atoi(nums[5])
 	port := (portOne * 256) + portTwo
 	host := nums[0] + "." + nums[1] + "." + nums[2] + "." + nums[3]
-	socket, err := newActiveSocket(host, port, conn.logger)
+	socket, err := newActiveSocket(host, port, conn.logger, conn.sessionID)
 	if err != nil {
 		conn.writeMessage(425, "Data connection failed")
 		return
@@ -706,6 +693,7 @@ func (cmd commandRetr) Execute(conn *Conn, param string) {
 	}()
 	bytes, data, err := conn.driver.GetFile(path, conn.lastFilePos)
 	if err == nil {
+		defer data.Close()
 		conn.writeMessage(150, fmt.Sprintf("Data transfer starting %v bytes", bytes))
 		err = conn.sendOutofBandDataWriter(data)
 	} else {
@@ -749,11 +737,11 @@ func (cmd commandRnfr) IsExtend() bool {
 }
 
 func (cmd commandRnfr) RequireParam() bool {
-	return false
+	return true
 }
 
 func (cmd commandRnfr) RequireAuth() bool {
-	return false
+	return true
 }
 
 func (cmd commandRnfr) Execute(conn *Conn, param string) {
@@ -770,11 +758,11 @@ func (cmd commandRnto) IsExtend() bool {
 }
 
 func (cmd commandRnto) RequireParam() bool {
-	return false
+	return true
 }
 
 func (cmd commandRnto) RequireAuth() bool {
-	return false
+	return true
 }
 
 func (cmd commandRnto) Execute(conn *Conn, param string) {
@@ -800,11 +788,11 @@ func (cmd commandRmd) IsExtend() bool {
 }
 
 func (cmd commandRmd) RequireParam() bool {
-	return false
+	return true
 }
 
 func (cmd commandRmd) RequireAuth() bool {
-	return false
+	return true
 }
 
 func (cmd commandRmd) Execute(conn *Conn, param string) {
@@ -855,7 +843,7 @@ func (cmd commandAuth) Execute(conn *Conn, param string) {
 		conn.writeMessage(234, "AUTH command OK")
 		err := conn.upgradeToTLS()
 		if err != nil {
-			conn.logger.Printf("Error upgrading conection to TLS %v", err)
+			conn.logger.Printf("Error upgrading connection to TLS %v", err.Error())
 		}
 	} else {
 		conn.writeMessage(550, "Action not taken")
@@ -927,7 +915,7 @@ func (cmd commandPbsz) RequireParam() bool {
 }
 
 func (cmd commandPbsz) RequireAuth() bool {
-	return true
+	return false
 }
 
 func (cmd commandPbsz) Execute(conn *Conn, param string) {
@@ -949,7 +937,7 @@ func (cmd commandProt) RequireParam() bool {
 }
 
 func (cmd commandProt) RequireAuth() bool {
-	return true
+	return false
 }
 
 func (cmd commandProt) Execute(conn *Conn, param string) {
@@ -1079,7 +1067,7 @@ func (cmd commandSyst) IsExtend() bool {
 }
 
 func (cmd commandSyst) RequireParam() bool {
-	return true
+	return false
 }
 
 func (cmd commandSyst) RequireAuth() bool {
@@ -1141,5 +1129,9 @@ func (cmd commandUser) RequireAuth() bool {
 
 func (cmd commandUser) Execute(conn *Conn, param string) {
 	conn.reqUser = param
-	conn.writeMessage(331, "User name ok, password required")
+	if conn.tls || conn.tlsConfig == nil {
+		conn.writeMessage(331, "User name ok, password required")
+	} else {
+		conn.writeMessage(534, "Unsecured login not allowed. AUTH TLS required")
+	}
 }
